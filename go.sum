@@ -66,6 +66,8 @@ github.com/cncf/udpa/go v0.0.0-20191209042840-269d4d468f6f/go.mod h1:M8M6+tZqaGX
 github.com/cncf/udpa/go v0.0.0-20200629203442-efcf912fb354/go.mod h1:WmhPx2Nbnhtbo57+VJT5O0JRkEi1Wbu0z5j0R8u5Hbk=
 github.com/cncf/udpa/go v0.0.0-20201120205902-5459f2c99403/go.mod h1:WmhPx2Nbnhtbo57+VJT5O0JRkEi1Wbu0z5j0R8u5Hbk=
 github.com/creack/pty v1.1.9/go.mod h1:oKZEueFk5CKHvIhNR5MUki03XCEU+Q6VDXinZuGJ33E=
+github.com/csi-addons/kubernetes-csi-addons v0.8.0 h1:zvYGp4DM6KdQzEX3dQSYKykqJdLZlxpVBJjtpbaqFjs=
+github.com/csi-addons/kubernetes-csi-addons v0.8.0/go.mod h1:dvinzoiXlqdOGDpKkYx8Jxl507BzVEEEO+SI0OmBaRI=
 github.com/davecgh/go-spew v1.1.0/go.mod h1:J7Y8YcW2NihsgmVo/mv3lAwl/skON4iLHjSsI+c5H38=
 github.com/davecgh/go-spew v1.1.1/go.mod h1:J7Y8YcW2NihsgmVo/mv3lAwl/skON4iLHjSsI+c5H38=
 github.com/davecgh/go-spew v1.1.2-0.20180830191138-d8f796af33cc h1:U9qPSI2PIWSS1VwoXQT9A3Wy9MM3WgvqSxFWenqJduM=
@@ -323,8 +325,8 @@ github.com/prometheus/common v0.57.0 h1:Ro/rKjwdq9mZn1K5QPctzh+MA4Lp0BuYk5ZZEVho
 github.com/prometheus/common v0.57.0/go.mod h1:7uRPFSUTbfZWsJ7MHY56sqt7hLQu3bxXHDnNhl8E9qI=
 github.com/prometheus/procfs v0.15.1 h1:YagwOFzUgYfKKHX6Dr+sHT7km/hxC76UB0learggepc=
 github.com/prometheus/procfs v0.15.1/go.mod h1:fB45yRUv8NstnjriLhBQLuOUt+WW4BsoGhij/e3PBqk=
-github.com/ramendr/ramen/api v0.0.0-20241001141243-29d6f22ad237 h1:ig6ePD0yopC5Qi5BRmhsIsKaOkdsGXTSmG3HTYIpquo=
-github.com/ramendr/ramen/api v0.0.0-20241001141243-29d6f22ad237/go.mod h1:nO6VM/+PEhcPGyFIQJdhY6ip822cA61PAy/s6IjenAA=
+github.com/ramendr/ramen/api v0.0.0-20241105140706-d8587766acb3 h1:q4UjNvv3jzKOeG/S+S1Ms2FV3WajBIE6266/7BIxdX4=
+github.com/ramendr/ramen/api v0.0.0-20241105140706-d8587766acb3/go.mod h1:O7VpTy8MMrh31DF4fv+2SZBSouAr8NlzIY4KYx7K75U=
 github.com/red-hat-storage/ocs-operator/services/provider/api/v4 v4.0.0-20241015071140-98c8184c6eec h1:M64BdwKMV3jKxcRsZiaGbRKsvlbhRGVZgcb4V/MFeWk=
 github.com/red-hat-storage/ocs-operator/services/provider/api/v4 v4.0.0-20241015071140-98c8184c6eec/go.mod h1:t9GJk69TGXABBF8fFPB+ImpbA9mJyRS86wW6+Qn8xHo=
 github.com/rogpeppe/go-internal v1.3.0/go.mod h1:M8bDsm7K2OlrFYOpmOWEs/qY81heoFRclV5y23lUDJ4=

@@ -114,6 +114,16 @@ func AddAnnotation(obj metav1.Object, key string, value string) bool {
 	return false
 }
 
+// AddAnnotations adds values from newAnnotations to the keys on the supplied obj or overwrites values for existing keys on the obj
+func AddAnnotations(obj metav1.Object, newAnnotations map[string]string) {
+	annotations := obj.GetAnnotations()
+	if annotations == nil {
+		annotations = map[string]string{}
+		obj.SetAnnotations(annotations)
+	}
+	maps.Copy(annotations, newAnnotations)
+}
+
 func GetMD5Hash(text string) string {
 	hash := md5.Sum([]byte(text))
 	return hex.EncodeToString(hash[:])

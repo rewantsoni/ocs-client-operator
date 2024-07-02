@@ -266,11 +266,8 @@ rules:
   resources:
   - drclusterconfigs
   verbs:
-  - create
-  - delete
   - get
   - list
-  - update
   - watch
 - apiGroups:
   - security.openshift.io

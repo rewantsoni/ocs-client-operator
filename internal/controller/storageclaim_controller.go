@@ -20,15 +20,20 @@ import (
 	"context"
 	"encoding/json"
 	"fmt"
+	"reflect"
 	"slices"
 	"strings"
 	"time"
+
+	"k8s.io/apimachinery/pkg/types"
+	"sigs.k8s.io/controller-runtime/pkg/event"
 
 	v1alpha1 "github.com/red-hat-storage/ocs-client-operator/api/v1alpha1"
 	"github.com/red-hat-storage/ocs-client-operator/pkg/templates"
 	"github.com/red-hat-storage/ocs-client-operator/pkg/utils"
 
 	csiopv1a1 "github.com/ceph/ceph-csi-operator/api/v1alpha1"
+	replicationv1alpha1 "github.com/csi-addons/kubernetes-csi-addons/apis/replication.storage/v1alpha1"
 	"github.com/go-logr/logr"
 
 	snapapi "github.com/kubernetes-csi/external-snapshotter/client/v8/apis/volumesnapshot/v1"
@@ -109,12 +114,44 @@ func (r *StorageClaimReconciler) SetupWithManager(mgr ctrl.Manager) error {
 	}); err != nil {
 		return fmt.Errorf("unable to set up FieldIndexer for VSC csi driver name: %v", err)
 	}
+	enqueueStorageClaim := handler.EnqueueRequestsFromMapFunc(
+		func(_ context.Context, _ client.Object) []reconcile.Request {
+			sclaims := &v1alpha1.StorageClaimList{}
+			err := r.list(sclaims)
+			if err != nil {
+				r.log.Error(err, "Unable to list StorageClaim objects")
+				return []reconcile.Request{}
+			}
 
+			// Return name and namespace of the StorageClaim object
+			request := []reconcile.Request{}
+			for _, claim := range sclaims.Items {
+				request = append(request, reconcile.Request{
+					NamespacedName: types.NamespacedName{
+						Name: claim.Name,
+					},
+				})
+			}
+			return request
+		},
+	)
+
+	drClusterConfigPredicate := predicate.Funcs{
+		UpdateFunc: func(e event.UpdateEvent) bool {
+			if e.ObjectOld == nil || e.ObjectNew == nil {
+				return false
+			}
+			oldObj := e.ObjectOld.(*ramenv1alpha1.DRClusterConfig)
+			newObj := e.ObjectNew.(*ramenv1alpha1.DRClusterConfig)
+			return !reflect.DeepEqual(oldObj.Spec.ReplicationSchedules, newObj.Spec.ReplicationSchedules)
+		},
+	}
 	generationChangePredicate := predicate.GenerationChangedPredicate{}
 	bldr := ctrl.NewControllerManagedBy(mgr).
 		For(&v1alpha1.StorageClaim{}, builder.WithPredicates(generationChangePredicate)).
 		Owns(&storagev1.StorageClass{}).
 		Owns(&snapapi.VolumeSnapshotClass{}).
+		Owns(&replicationv1alpha1.VolumeReplicationClass{}, builder.WithPredicates(generationChangePredicate)).
 		Owns(&csiopv1a1.ClientProfile{}, builder.WithPredicates(generationChangePredicate)).
 		Watches(
 			&extv1.CustomResourceDefinition{},
@@ -127,7 +164,8 @@ func (r *StorageClaimReconciler) SetupWithManager(mgr ctrl.Manager) error {
 		)
 
 	if r.AvailableCrds[drClusterConfigCRDName] {
-		bldr = bldr.Owns(&ramenv1alpha1.DRClusterConfig{}, builder.WithPredicates(generationChangePredicate))
+		bldr = bldr.Watches(&ramenv1alpha1.DRClusterConfig{}, enqueueStorageClaim,
+			builder.WithPredicates(drClusterConfigPredicate))
 	}
 
 	return bldr.Complete(r)
@@ -141,8 +179,8 @@ func (r *StorageClaimReconciler) SetupWithManager(mgr ctrl.Manager) error {
 //+kubebuilder:rbac:groups=snapshot.storage.k8s.io,resources=volumesnapshotclasses,verbs=get;list;watch;create;delete
 //+kubebuilder:rbac:groups=core,resources=persistentvolumes,verbs=get;list;watch
 //+kubebuilder:rbac:groups=snapshot.storage.k8s.io,resources=volumesnapshotcontents,verbs=get;list;watch
+//+kubebuilder:rbac:groups=ramendr.openshift.io,resources=drclusterconfigs,verbs=get;list;watch
 //+kubebuilder:rbac:groups=csi.ceph.io,resources=clientprofiles,verbs=get;list;update;create;watch;delete
-//+kubebuilder:rbac:groups=ramendr.openshift.io,resources=drclusterconfigs,verbs=get;list;update;create;watch;delete
 
 // Reconcile is part of the main kubernetes reconciliation loop which aims to
 // move the current state of the cluster closer to the desired state.
@@ -424,6 +462,61 @@ func (r *StorageClaimReconciler) reconcilePhases() (reconcile.Result, error) {
 				if err != nil {
 					return reconcile.Result{}, fmt.Errorf("failed to create or update VolumeSnapshotClass: %s", err)
 				}
+			case "VolumeReplicationClass":
+				data := map[string]string{}
+				err = json.Unmarshal(resource.Data, &data)
+				if err != nil {
+					return reconcile.Result{}, fmt.Errorf("failed to unmarshal StorageClaim configuration response: %v", err)
+				}
+				var volumeReplicationClass, volumeReplicationClassFlattenMode *replicationv1alpha1.VolumeReplicationClass
+				data["replication.storage.openshift.io/replication-secret-namespace"] = r.OperatorNamespace
+				// generate a new clusterID for cephfs subvolumegroup, as
+				// storageclaim is clusterscoped resources using its
+				// hash as the clusterID
+				data["clusterID"] = r.storageClaimHash
+
+				volumeReplicationClass = &replicationv1alpha1.VolumeReplicationClass{
+					ObjectMeta: metav1.ObjectMeta{
+						Name: r.storageClaim.Name,
+					},
+				}
+				volumeReplicationClassFlattenMode = &replicationv1alpha1.VolumeReplicationClass{
+					ObjectMeta: metav1.ObjectMeta{
+						Name: fmt.Sprintf("%s-flatten", r.storageClient.Name),
+					},
+				}
+
+				drclusterconfigs := &ramenv1alpha1.DRClusterConfigList{}
+				err = r.list(drclusterconfigs)
+				if err != nil {
+					return reconcile.Result{}, fmt.Errorf("failed to get DRClusterConfigList: %v", err)
+				}
+				for _, drclusterconfig := range drclusterconfigs.Items {
+					for interval := range drclusterconfig.Spec.ReplicationSchedules {
+						data["schedulingInterval"] = fmt.Sprintf("%d", interval)
+						err = utils.CreateOrReplace(r.ctx, r.Client, volumeReplicationClass, func() error {
+							utils.AddLabels(volumeReplicationClass, resource.Labels)
+							utils.AddAnnotation(volumeReplicationClass, storageClaimAnnotation, r.storageClaim.Name)
+							utils.AddAnnotations(volumeReplicationClass, resource.Annotations)
+							volumeReplicationClass.Spec.Parameters = data
+							return nil
+						})
+						if err != nil {
+							return reconcile.Result{}, fmt.Errorf("failed to create or update VolumeReplicationClass: %s", err)
+						}
+						err = utils.CreateOrReplace(r.ctx, r.Client, volumeReplicationClassFlattenMode, func() error {
+							utils.AddLabels(volumeReplicationClassFlattenMode, resource.Labels)
+							utils.AddAnnotation(volumeReplicationClassFlattenMode, storageClaimAnnotation, r.storageClaim.Name)
+							utils.AddAnnotations(volumeReplicationClassFlattenMode, resource.Annotations)
+							volumeReplicationClassFlattenMode.Spec.Parameters = data
+							return nil
+						})
+						if err != nil {
+							return reconcile.Result{}, fmt.Errorf("failed to create or update VolumeReplicationClass for flatten mode: %s", err)
+						}
+					}
+				}
+
 			case "ClientProfile":
 				clientProfile := &csiopv1a1.ClientProfile{}
 				clientProfile.Name = r.storageClaimHash
