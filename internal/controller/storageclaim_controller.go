@@ -53,9 +53,10 @@ import (
 )
 
 const (
-	storageClaimFinalizer  = "storageclaim.ocs.openshift.io"
-	storageClaimAnnotation = "ocs.openshift.io/storageclaim"
-	keyRotationAnnotation  = "keyrotation.csiaddons.openshift.io/schedule"
+	storageClaimFinalizer   = "storageclaim.ocs.openshift.io"
+	storageClaimAnnotation  = "ocs.openshift.io/storageclaim"
+	storageClientAnnotation = "ocs.openshift.io/storageclient"
+	keyRotationAnnotation   = "keyrotation.csiaddons.openshift.io/schedule"
 
 	pvClusterIDIndexName  = "index:persistentVolumeClusterID"
 	vscClusterIDIndexName = "index:volumeSnapshotContentCSIDriver"
@@ -392,6 +393,7 @@ func (r *StorageClaimReconciler) reconcilePhases() (reconcile.Result, error) {
 					storageClass = r.getCephRBDStorageClass(data)
 				}
 				utils.AddAnnotation(storageClass, storageClaimAnnotation, r.storageClaim.Name)
+				utils.AddAnnotation(storageClass, storageClientAnnotation, r.storageClient.Name)
 				err = r.createOrReplaceStorageClass(storageClass)
 				if err != nil {
 					return reconcile.Result{}, fmt.Errorf("failed to create or update StorageClass: %s", err)
