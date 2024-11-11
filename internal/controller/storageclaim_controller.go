@@ -20,6 +20,7 @@ import (
 	"context"
 	"encoding/json"
 	"fmt"
+	"k8s.io/utils/ptr"
 	"slices"
 	"strings"
 	"time"
@@ -378,21 +379,32 @@ func (r *StorageClaimReconciler) reconcilePhases() (reconcile.Result, error) {
 				delete(data, "radosnamespace")
 				delete(data, "subvolumegroupname")
 
-				var storageClass *storagev1.StorageClass
+				storageClass := &storagev1.StorageClass{}
 				data["csi.storage.k8s.io/provisioner-secret-namespace"] = r.OperatorNamespace
 				data["csi.storage.k8s.io/node-stage-secret-namespace"] = r.OperatorNamespace
 				data["csi.storage.k8s.io/controller-expand-secret-namespace"] = r.OperatorNamespace
 				data["clusterID"] = r.storageClaimHash
 
-				if resource.Name == "cephfs" {
-					storageClass = r.getCephFSStorageClass()
-				} else if resource.Name == "ceph-rbd" {
-					storageClass = r.getCephRBDStorageClass()
-				}
-				utils.AddLabels(storageClass, resource.Labels)
-				utils.AddAnnotation(storageClass, storageClaimAnnotation, r.storageClaim.Name)
+				storageClass.Name = r.storageClaim.Name
 				err = utils.CreateOrReplace(r.ctx, r.Client, storageClass, func() error {
+					storageClass.ReclaimPolicy = ptr.To(corev1.PersistentVolumeReclaimDelete)
+					storageClass.AllowVolumeExpansion = ptr.To(true)
 					storageClass.Parameters = data
+
+					utils.AddLabels(storageClass, resource.Labels)
+					utils.AddAnnotation(storageClass, storageClaimAnnotation, r.storageClaim.Name)
+
+					if resource.Name == "cephfs" {
+						storageClass.Provisioner = templates.CephFsDriverName
+						utils.AddAnnotation(storageClass, "description", "Provides RWO and RWX Filesystem volumes")
+					} else if resource.Name == "ceph-rbd" {
+						storageClass.Provisioner = templates.RBDDriverName
+						utils.AddAnnotation(storageClass, "description", "Provides RWO Filesystem volumes, and RWO and RWX Block volumes")
+						utils.AddAnnotation(storageClass, "reclaimspace.csiaddons.openshift.io/schedule", "@weekly")
+						if r.storageClaim.Spec.EncryptionMethod != "" {
+							utils.AddAnnotation(storageClass, keyRotationAnnotation, utils.CronScheduleWeekly)
+						}
+					}
 					return nil
 				})
 				if err != nil {
@@ -404,21 +416,25 @@ func (r *StorageClaimReconciler) reconcilePhases() (reconcile.Result, error) {
 				if err != nil {
 					return reconcile.Result{}, fmt.Errorf("failed to unmarshal StorageClaim configuration response: %v", err)
 				}
-				var volumeSnapshotClass *snapapi.VolumeSnapshotClass
+				volumeSnapshotClass := &snapapi.VolumeSnapshotClass{}
 				data["csi.storage.k8s.io/snapshotter-secret-namespace"] = r.OperatorNamespace
 				// generate a new clusterID for cephfs subvolumegroup, as
 				// storageclaim is clusterscoped resources using its
 				// hash as the clusterID
 				data["clusterID"] = r.storageClaimHash
-				if resource.Name == "cephfs" {
-					volumeSnapshotClass = r.getCephFSVolumeSnapshotClass()
-				} else if resource.Name == "ceph-rbd" {
-					volumeSnapshotClass = r.getCephRBDVolumeSnapshotClass()
-				}
-				utils.AddLabels(volumeSnapshotClass, resource.Labels)
-				utils.AddAnnotation(volumeSnapshotClass, storageClaimAnnotation, r.storageClaim.Name)
+
+				volumeSnapshotClass.Name = r.storageClaim.Name
 				err = utils.CreateOrReplace(r.ctx, r.Client, volumeSnapshotClass, func() error {
 					volumeSnapshotClass.Parameters = data
+					volumeSnapshotClass.DeletionPolicy = snapapi.VolumeSnapshotContentDelete
+					utils.AddLabels(volumeSnapshotClass, resource.Labels)
+					utils.AddAnnotation(volumeSnapshotClass, storageClaimAnnotation, r.storageClaim.Name)
+
+					if resource.Name == "cephfs" {
+						volumeSnapshotClass.Driver = templates.CephFsDriverName
+					} else if resource.Name == "ceph-rbd" {
+						volumeSnapshotClass.Driver = templates.RBDDriverName
+					}
 					return nil
 				})
 				if err != nil {
@@ -487,67 +503,6 @@ func (r *StorageClaimReconciler) reconcilePhases() (reconcile.Result, error) {
 	}
 
 	return reconcile.Result{}, nil
-}
-
-func (r *StorageClaimReconciler) getCephFSStorageClass() *storagev1.StorageClass {
-	pvReclaimPolicy := corev1.PersistentVolumeReclaimDelete
-	allowVolumeExpansion := true
-	storageClass := &storagev1.StorageClass{
-		ObjectMeta: metav1.ObjectMeta{
-			Name: r.storageClaim.Name,
-			Annotations: map[string]string{
-				"description": "Provides RWO and RWX Filesystem volumes",
-			},
-		},
-		ReclaimPolicy:        &pvReclaimPolicy,
-		AllowVolumeExpansion: &allowVolumeExpansion,
-		Provisioner:          templates.CephFsDriverName,
-	}
-	return storageClass
-}
-
-func (r *StorageClaimReconciler) getCephRBDStorageClass() *storagev1.StorageClass {
-	pvReclaimPolicy := corev1.PersistentVolumeReclaimDelete
-	allowVolumeExpansion := true
-	storageClass := &storagev1.StorageClass{
-		ObjectMeta: metav1.ObjectMeta{
-			Name: r.storageClaim.Name,
-			Annotations: map[string]string{
-				"description": "Provides RWO Filesystem volumes, and RWO and RWX Block volumes",
-				"reclaimspace.csiaddons.openshift.io/schedule": "@weekly",
-			},
-		},
-		ReclaimPolicy:        &pvReclaimPolicy,
-		AllowVolumeExpansion: &allowVolumeExpansion,
-		Provisioner:          templates.RBDDriverName,
-	}
-
-	if r.storageClaim.Spec.EncryptionMethod != "" {
-		utils.AddAnnotation(storageClass, keyRotationAnnotation, utils.CronScheduleWeekly)
-	}
-	return storageClass
-}
-
-func (r *StorageClaimReconciler) getCephFSVolumeSnapshotClass() *snapapi.VolumeSnapshotClass {
-	volumesnapshotclass := &snapapi.VolumeSnapshotClass{
-		ObjectMeta: metav1.ObjectMeta{
-			Name: r.storageClaim.Name,
-		},
-		Driver:         templates.CephFsDriverName,
-		DeletionPolicy: snapapi.VolumeSnapshotContentDelete,
-	}
-	return volumesnapshotclass
-}
-
-func (r *StorageClaimReconciler) getCephRBDVolumeSnapshotClass() *snapapi.VolumeSnapshotClass {
-	volumesnapshotclass := &snapapi.VolumeSnapshotClass{
-		ObjectMeta: metav1.ObjectMeta{
-			Name: r.storageClaim.Name,
-		},
-		Driver:         templates.RBDDriverName,
-		DeletionPolicy: snapapi.VolumeSnapshotContentDelete,
-	}
-	return volumesnapshotclass
 }
 
 func (r *StorageClaimReconciler) get(obj client.Object) error {
