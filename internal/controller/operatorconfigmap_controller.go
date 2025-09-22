@@ -31,7 +31,7 @@ import (
 	"github.com/red-hat-storage/ocs-client-operator/pkg/templates"
 	"github.com/red-hat-storage/ocs-client-operator/pkg/utils"
 
-	csiopv1 "github.com/ceph/ceph-csi-operator/api/v1"
+	csiopv1 "github.com/ceph/ceph-csi-operator/api/v1alpha1"
 	"github.com/go-logr/logr"
 	nbv1 "github.com/noobaa/noobaa-operator/v5/pkg/apis/noobaa/v1alpha1"
 	configv1 "github.com/openshift/api/config/v1"
@@ -66,10 +66,7 @@ import (
 var pvcPrometheusRules string
 
 const (
-	operatorConfigMapName = "ocs-client-operator-config"
-	// ClusterVersionName is the name of the ClusterVersion object in the
-	// openshift cluster.
-	clusterVersionName                 = "version"
+	operatorConfigMapName              = "ocs-client-operator-config"
 	manageNoobaaSubKey                 = "manageNoobaaSubscription"
 	disableVersionChecksKey            = "disableVersionChecks"
 	disableInstallPlanAutoApprovalKey  = "disableInstallPlanAutoApproval"
@@ -169,7 +166,6 @@ func (c *OperatorConfigMapReconciler) SetupWithManager(mgr ctrl.Manager) error {
 		Owns(&corev1.Service{}, servicePredicate).
 		Owns(&csiopv1.OperatorConfig{}, builder.WithPredicates(generationChangePredicate)).
 		Owns(&csiopv1.Driver{}, builder.WithPredicates(generationChangePredicate)).
-		Watches(&configv1.ClusterVersion{}, enqueueConfigMapRequest, clusterVersionPredicates).
 		Watches(
 			&extv1.CustomResourceDefinition{},
 			enqueueConfigMapRequest,
@@ -210,12 +206,16 @@ func (c *OperatorConfigMapReconciler) SetupWithManager(mgr ctrl.Manager) error {
 			),
 		)
 	}
+	if c.AvailableCrds[utils.ClusterVersionCRDName] {
+		bldr.Watches(&configv1.ClusterVersion{}, enqueueConfigMapRequest, clusterVersionPredicates)
+	}
 
 	return bldr.Complete(c)
 }
 
 //+kubebuilder:rbac:groups=apiextensions.k8s.io,resources=customresourcedefinitions,verbs=get;list;watch
 //+kubebuilder:rbac:groups=config.openshift.io,resources=clusterversions,verbs=get;list;watch
+//+kubebuilder:rbac:groups=core,resources=namespaces;nodes,verbs=get;list;watch;
 //+kubebuilder:rbac:groups="apps",resources=deployments,verbs=get;list;watch
 //+kubebuilder:rbac:groups="apps",resources=deployments/finalizers,verbs=update
 //+kubebuilder:rbac:groups="apps",resources=daemonsets,verbs=get;list;watch
@@ -351,11 +351,6 @@ func (c *OperatorConfigMapReconciler) Reconcile(ctx context.Context, req ctrl.Re
 			return ctrl.Result{}, err
 		}
 
-		if err := c.reconcileODFSnapshotterSubscription(); err != nil {
-			c.log.Error(err, "unable to reconcile ODF External Snapshotter Operator subscription")
-			return ctrl.Result{}, err
-		}
-
 		if c.shouldAutoApproveInstallPlans() {
 			if err := c.reconcileInstallPlans(); err != nil {
 				c.log.Error(err, "unable to reconcile InstallPlans")
@@ -363,9 +358,11 @@ func (c *OperatorConfigMapReconciler) Reconcile(ctx context.Context, req ctrl.Re
 			}
 		}
 
-		if err := c.ensureConsolePlugin(); err != nil {
-			c.log.Error(err, "unable to deploy client console")
-			return ctrl.Result{}, err
+		if c.AvailableCrds["consoleplugins.console.openshift.io"] {
+			if err := c.ensureConsolePlugin(); err != nil {
+				c.log.Error(err, "unable to deploy client console")
+				return ctrl.Result{}, err
+			}
 		}
 
 		if err := c.reconcileDelegatedCSI(storageClients); err != nil {
@@ -492,27 +489,25 @@ func (c *OperatorConfigMapReconciler) reconcileDelegatedCSI(storageClients *v1al
 	}
 
 	// scc
-	scc := &secv1.SecurityContextConstraints{}
-	scc.Name = templates.SCCName
-	if err := c.createOrUpdate(scc, func() error {
-		templates.SetSecurityContextConstraintsDesiredState(scc, c.OperatorNamespace)
-		return nil
-	}); err != nil {
-		return fmt.Errorf("failed to reconcile scc: %v", err)
+	if c.AvailableCrds["securitycontextconstraints.security.openshift.io"] {
+		scc := &secv1.SecurityContextConstraints{}
+		scc.Name = templates.SCCName
+		if err := c.createOrUpdate(scc, func() error {
+			templates.SetSecurityContextConstraintsDesiredState(scc, c.OperatorNamespace)
+			return nil
+		}); err != nil {
+			return fmt.Errorf("failed to reconcile scc: %v", err)
+		}
 	}
 
-	// cluster version
-	clusterVersion := &configv1.ClusterVersion{}
-	clusterVersion.Name = clusterVersionName
-	if err := c.get(clusterVersion); err != nil {
+	clusterID, err := utils.GetClusterId(c.ctx, c.Client)
+	if err != nil {
+		return fmt.Errorf("failed to get cluster id: %v", err)
+	}
+
+	clusterVersion, err := utils.GetClusterVersion(c.ctx, c.Client)
+	if err != nil {
 		return fmt.Errorf("failed to get cluster version: %v", err)
-	}
-
-	historyRecord := utils.Find(clusterVersion.Status.History, func(record *configv1.UpdateHistory) bool {
-		return record.State == configv1.CompletedUpdate
-	})
-	if historyRecord == nil {
-		return fmt.Errorf("unable to find the updated cluster version")
 	}
 
 	cniNetworkAnnotationValue := ""
@@ -539,7 +534,7 @@ func (c *OperatorConfigMapReconciler) reconcileDelegatedCSI(storageClients *v1al
 	}
 
 	// csi operator config
-	cmName, err := c.getImageSetConfigMapName(historyRecord.Version)
+	cmName, err := c.getImageSetConfigMapName(clusterVersion)
 	if err != nil {
 		return fmt.Errorf("failed to get desired imageset configmap name: %v", err)
 	}
@@ -553,7 +548,7 @@ func (c *OperatorConfigMapReconciler) reconcileDelegatedCSI(storageClients *v1al
 		templates.CSIOperatorConfigSpec.DeepCopyInto(&csiOperatorConfig.Spec)
 		driverSpecDefaults := csiOperatorConfig.Spec.DriverSpecDefaults
 		driverSpecDefaults.ImageSet = &corev1.LocalObjectReference{Name: cmName}
-		driverSpecDefaults.ClusterName = ptr.To(string(clusterVersion.Spec.ClusterID))
+		driverSpecDefaults.ClusterName = ptr.To(clusterID)
 		if c.AvailableCrds[VolumeGroupSnapshotClassCrdName] {
 			driverSpecDefaults.SnapshotPolicy = csiopv1.VolumeGroupSnapshotPolicy
 		}
@@ -906,20 +901,6 @@ func (c *OperatorConfigMapReconciler) reconcileRecipeOperatorSubscription() erro
 		recipeOperatorSubscription.Spec.Channel = c.subscriptionChannel
 		if err := c.update(recipeOperatorSubscription); err != nil {
 			return fmt.Errorf("failed to update subscription channel of 'recipe' to %v: %v", c.subscriptionChannel, err)
-		}
-	}
-	return nil
-}
-
-func (c *OperatorConfigMapReconciler) reconcileODFSnapshotterSubscription() error {
-	odfSnapshotterSubscription, err := c.getSubscriptionByPackageName("odf-external-snapshotter-operator")
-	if err != nil {
-		return err
-	}
-	if c.subscriptionChannel != "" && c.subscriptionChannel != odfSnapshotterSubscription.Spec.Channel {
-		odfSnapshotterSubscription.Spec.Channel = c.subscriptionChannel
-		if err := c.update(odfSnapshotterSubscription); err != nil {
-			return fmt.Errorf("failed to update subscription channel of 'odf-external-snapshotter-operator' to %v: %v", c.subscriptionChannel, err)
 		}
 	}
 	return nil

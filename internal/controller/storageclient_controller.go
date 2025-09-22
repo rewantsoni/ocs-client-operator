@@ -33,7 +33,7 @@ import (
 	"google.golang.org/grpc/codes"
 	"google.golang.org/grpc/status"
 
-	csiopv1 "github.com/ceph/ceph-csi-operator/api/v1"
+	csiopv1 "github.com/ceph/ceph-csi-operator/api/v1alpha1"
 	replicationv1a1 "github.com/csi-addons/kubernetes-csi-addons/api/replication.storage/v1alpha1"
 	"github.com/go-logr/logr"
 	groupsnapapi "github.com/kubernetes-csi/external-snapshotter/client/v8/apis/volumegroupsnapshot/v1beta1"
@@ -83,6 +83,7 @@ const (
 
 	VolumeGroupSnapshotClassCrdName    = "volumegroupsnapshotclasses.groupsnapshot.storage.k8s.io"
 	OdfVolumeGroupSnapshotClassCrdName = "volumegroupsnapshotclasses.groupsnapshot.storage.openshift.io"
+	ClusterResourceQuotaCrdName        = "clusterresourcequotas.quota.openshift.io"
 )
 
 var (
@@ -192,7 +193,6 @@ func (r *StorageClientReconciler) SetupWithManager(mgr ctrl.Manager) error {
 	controller, err := ctrl.NewControllerManagedBy(mgr).
 		For(&v1alpha1.StorageClient{}).
 		Owns(&batchv1.CronJob{}).
-		Owns(&quotav1.ClusterResourceQuota{}, builder.WithPredicates(generationChangePredicate)).
 		Owns(&corev1.Secret{}).
 		Owns(&csiopv1.CephConnection{}, builder.WithPredicates(generationChangePredicate)).
 		Owns(&csiopv1.ClientProfileMapping{}, builder.WithPredicates(generationChangePredicate)).
@@ -218,6 +218,7 @@ func (r *StorageClientReconciler) SetupWithManager(mgr ctrl.Manager) error {
 	r.cache = mgr.GetCache()
 	r.crdsBeingWatched.Store(VolumeGroupSnapshotClassCrdName, false)
 	r.crdsBeingWatched.Store(OdfVolumeGroupSnapshotClassCrdName, false)
+	r.crdsBeingWatched.Store(ClusterResourceQuotaCrdName, false)
 
 	return err
 }
@@ -236,6 +237,7 @@ func (r *StorageClientReconciler) SetupWithManager(mgr ctrl.Manager) error {
 //+kubebuilder:rbac:groups=replication.storage.openshift.io,resources=volumegroupreplicationclasses,verbs=get;list;watch;create;delete;update
 //+kubebuilder:rbac:groups=storage.k8s.io,resources=storageclasses,verbs=get;list;watch;create;delete;update
 //+kubebuilder:rbac:groups=core,resources=persistentvolumes,verbs=get;list;watch
+//+kubebuilder:rbac:groups=core,resources=namespaces;nodes,verbs=get;list;watch;
 //+kubebuilder:rbac:groups=snapshot.storage.k8s.io,resources=volumesnapshotclasses,verbs=get;list;watch;create;delete;update
 //+kubebuilder:rbac:groups=snapshot.storage.k8s.io,resources=volumesnapshotcontents,verbs=get;list;watch
 //+kubebuilder:rbac:groups=groupsnapshot.storage.k8s.io,resources=volumegroupsnapshotclasses,verbs=get;list;watch;create;delete;update
@@ -288,6 +290,10 @@ func (r *storageClientReconcile) reconcileDynamicWatches() error {
 	}
 
 	if err := r.reconcileOdfVolumeGroupSnapshot(); err != nil {
+		return err
+	}
+
+	if err := r.reconcileClusterResourceQuota(); err != nil {
 		return err
 	}
 	return nil
@@ -402,6 +408,45 @@ func (r *storageClientReconcile) reconcileOdfVolumeGroupSnapshot() error {
 		return fmt.Errorf("unable to set up FieldIndexer for VGSC csi driver name: %v", err)
 	}
 	r.crdsBeingWatched.Store(OdfVolumeGroupSnapshotClassCrdName, true)
+	return nil
+}
+
+func (r *storageClientReconcile) reconcileClusterResourceQuota() error {
+	if watchExists, foundCrd := r.crdsBeingWatched.Load(ClusterResourceQuotaCrdName); !foundCrd || watchExists.(bool) {
+		return nil
+	}
+
+	crd := &metav1.PartialObjectMetadata{}
+	crd.SetGroupVersionKind(extv1.SchemeGroupVersion.WithKind("CustomResourceDefinition"))
+	crd.Name = ClusterResourceQuotaCrdName
+	if err := r.get(crd); client.IgnoreNotFound(err) != nil {
+		return err
+	}
+	// CRD doesn't exist in the cluster
+	if crd.UID == "" {
+		return nil
+	}
+
+	// establish a watch
+	if err := r.controller.Watch(
+		source.Kind(
+			r.cache,
+			client.Object(&quotav1.ClusterResourceQuota{}),
+			handler.EnqueueRequestsFromMapFunc(func(_ context.Context, o client.Object) []ctrl.Request {
+				owner := metav1.GetControllerOf(o)
+				if owner != nil &&
+					owner.Kind == "StorageClient" &&
+					owner.APIVersion == v1alpha1.GroupVersion.String() {
+					return []ctrl.Request{{NamespacedName: types.NamespacedName{Name: owner.Name}}}
+				}
+				return nil
+			}),
+		),
+	); err != nil {
+		return fmt.Errorf("failed to setup dynamic watch on %s: %v", crd.Name, err)
+	}
+
+	r.crdsBeingWatched.Store(ClusterResourceQuotaCrdName, true)
 	return nil
 }
 

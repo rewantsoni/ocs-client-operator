@@ -3,7 +3,7 @@ package templates
 import (
 	"fmt"
 
-	csiopv1 "github.com/ceph/ceph-csi-operator/api/v1"
+	csiopv1 "github.com/ceph/ceph-csi-operator/api/v1alpha1"
 	secv1 "github.com/openshift/api/security/v1"
 	corev1 "k8s.io/api/core/v1"
 	storagev1 "k8s.io/api/storage/v1"
@@ -89,8 +89,8 @@ var CSIOperatorConfigSpec = csiopv1.OperatorConfigSpec{
 		},
 		AttachRequired:  ptr.To(true),
 		DeployCsiAddons: ptr.To(true),
-		EnableFencing:   ptr.To(true),
-		FsGroupPolicy:   storagev1.FileFSGroupPolicy,
+		//EnableFencing:   ptr.To(true),
+		FsGroupPolicy: storagev1.FileFSGroupPolicy,
 		ControllerPlugin: &csiopv1.ControllerPluginSpec{
 			Privileged: ptr.To(true),
 			Resources: csiopv1.ControllerPluginResourcesSpec{
