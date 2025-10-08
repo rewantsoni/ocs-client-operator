@@ -68,10 +68,7 @@ import (
 var pvcPrometheusRules string
 
 const (
-	operatorConfigMapName = "ocs-client-operator-config"
-	// ClusterVersionName is the name of the ClusterVersion object in the
-	// openshift cluster.
-	clusterVersionName                 = "version"
+	operatorConfigMapName              = "ocs-client-operator-config"
 	manageNoobaaSubKey                 = "manageNoobaaSubscription"
 	disableVersionChecksKey            = "disableVersionChecks"
 	subscriptionLabelKey               = "managed-by"
@@ -170,7 +167,6 @@ func (c *OperatorConfigMapReconciler) SetupWithManager(mgr ctrl.Manager) error {
 		Owns(&corev1.Service{}, servicePredicate).
 		Owns(&csiopv1a1.OperatorConfig{}, builder.WithPredicates(generationChangePredicate)).
 		Owns(&csiopv1a1.Driver{}, builder.WithPredicates(generationChangePredicate)).
-		Watches(&configv1.ClusterVersion{}, enqueueConfigMapRequest, clusterVersionPredicates).
 		Watches(
 			&extv1.CustomResourceDefinition{},
 			enqueueConfigMapRequest,
@@ -199,6 +195,9 @@ func (c *OperatorConfigMapReconciler) SetupWithManager(mgr ctrl.Manager) error {
 			),
 		)
 	}
+	if c.AvailableCrds[utils.ClusterVersionCRDName] {
+		bldr.Watches(&configv1.ClusterVersion{}, enqueueConfigMapRequest, clusterVersionPredicates)
+	}
 
 	return bldr.Complete(c)
 }
@@ -207,6 +206,7 @@ func (c *OperatorConfigMapReconciler) SetupWithManager(mgr ctrl.Manager) error {
 //+kubebuilder:rbac:groups=config.openshift.io,resources=clusterversions,verbs=get;list;watch
 //+kubebuilder:rbac:groups="apps",resources=deployments,verbs=get;list;watch
 //+kubebuilder:rbac:groups="apps",resources=deployments/finalizers,verbs=update
+//+kubebuilder:rbac:groups=core,resources=namespaces;nodes,verbs=get;list;watch;
 //+kubebuilder:rbac:groups="apps",resources=daemonsets,verbs=get;list;watch
 //+kubebuilder:rbac:groups="",resources=configmaps,verbs=get;list;watch;create;update;delete
 //+kubebuilder:rbac:groups="",resources=configmaps/finalizers,verbs=update
@@ -339,9 +339,11 @@ func (c *OperatorConfigMapReconciler) Reconcile(ctx context.Context, req ctrl.Re
 			return ctrl.Result{}, err
 		}
 
-		if err := c.ensureConsolePlugin(); err != nil {
-			c.log.Error(err, "unable to deploy client console")
-			return ctrl.Result{}, err
+		if c.AvailableCrds["consoleplugins.console.openshift.io"] {
+			if err := c.ensureConsolePlugin(); err != nil {
+				c.log.Error(err, "unable to deploy client console")
+				return ctrl.Result{}, err
+			}
 		}
 
 		if err := c.reconcileDelegatedCSI(storageClients); err != nil {
@@ -436,29 +438,26 @@ func (c *OperatorConfigMapReconciler) reconcileDelegatedCSI(storageClients *v1al
 	}
 
 	// scc
-	scc := &secv1.SecurityContextConstraints{}
-	scc.Name = templates.SCCName
-	if err := c.createOrUpdate(scc, func() error {
-		templates.SetSecurityContextConstraintsDesiredState(scc, c.OperatorNamespace)
-		return nil
-	}); err != nil {
-		return fmt.Errorf("failed to reconcile scc: %v", err)
+	if c.AvailableCrds["securitycontextconstraints.security.openshift.io"] {
+		scc := &secv1.SecurityContextConstraints{}
+		scc.Name = templates.SCCName
+		if err := c.createOrUpdate(scc, func() error {
+			templates.SetSecurityContextConstraintsDesiredState(scc, c.OperatorNamespace)
+			return nil
+		}); err != nil {
+			return fmt.Errorf("failed to reconcile scc: %v", err)
+		}
 	}
 
-	// cluster version
-	clusterVersion := &configv1.ClusterVersion{}
-	clusterVersion.Name = clusterVersionName
-	if err := c.get(clusterVersion); err != nil {
+	clusterID, err := utils.GetClusterId(c.ctx, c.Client)
+	if err != nil {
+		return fmt.Errorf("failed to get cluster id: %v", err)
+	}
+
+	clusterVersion, err := utils.GetClusterVersion(c.ctx, c.Client)
+	if err != nil {
 		return fmt.Errorf("failed to get cluster version: %v", err)
 	}
-
-	historyRecord := utils.Find(clusterVersion.Status.History, func(record *configv1.UpdateHistory) bool {
-		return record.State == configv1.CompletedUpdate
-	})
-	if historyRecord == nil {
-		return fmt.Errorf("unable to find the updated cluster version")
-	}
-
 	cniNetworkAnnotationValue := ""
 	topologyDomainLablesSet := map[string]struct{}{}
 	for i := range storageClients.Items {
@@ -483,7 +482,7 @@ func (c *OperatorConfigMapReconciler) reconcileDelegatedCSI(storageClients *v1al
 	}
 
 	// csi operator config
-	cmName, err := c.getImageSetConfigMapName(historyRecord.Version)
+	cmName, err := c.getImageSetConfigMapName(clusterVersion)
 	if err != nil {
 		return fmt.Errorf("failed to get desired imageset configmap name: %v", err)
 	}
@@ -497,7 +496,7 @@ func (c *OperatorConfigMapReconciler) reconcileDelegatedCSI(storageClients *v1al
 		templates.CSIOperatorConfigSpec.DeepCopyInto(&csiOperatorConfig.Spec)
 		driverSpecDefaults := csiOperatorConfig.Spec.DriverSpecDefaults
 		driverSpecDefaults.ImageSet = &corev1.LocalObjectReference{Name: cmName}
-		driverSpecDefaults.ClusterName = ptr.To(string(clusterVersion.Spec.ClusterID))
+		driverSpecDefaults.ClusterName = ptr.To(clusterID)
 		if c.AvailableCrds[VolumeGroupSnapshotClassCrdName] {
 			driverSpecDefaults.SnapshotPolicy = csiopv1a1.VolumeGroupSnapshotPolicy
 		}

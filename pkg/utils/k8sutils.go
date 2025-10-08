@@ -21,8 +21,12 @@ import (
 	"crypto/md5"
 	"encoding/hex"
 	"fmt"
+	"github.com/blang/semver/v4"
+	corev1 "k8s.io/api/core/v1"
+	"k8s.io/apimachinery/pkg/api/meta"
 	"maps"
 	"os"
+	"strings"
 	"time"
 
 	configv1 "github.com/openshift/api/config/v1"
@@ -64,6 +68,11 @@ const (
 	OcsClientTimeout = 10 * time.Second
 
 	OperatorVersionEnvVar = "OPERATOR_VERSION"
+
+	ClusterVersionCRDName = "clusterversions.config.openshift.io"
+	// ClusterVersionName is the name of the ClusterVersion object in the
+	// openshift cluster.
+	clusterVersionName = "version"
 )
 
 // GetOperatorNamespace returns the namespace where the operator is deployed.
@@ -182,27 +191,119 @@ func SetClusterInformation(
 	status interfaces.StorageClientInfo,
 ) error {
 
-	clusterVersion := &configv1.ClusterVersion{}
-	clusterVersion.Name = "version"
-	if err := kubeClient.Get(ctx, client.ObjectKeyFromObject(clusterVersion), clusterVersion); err != nil {
+	clusterVersion, err := GetClusterVersion(ctx, kubeClient)
+	if err != nil {
 		return fmt.Errorf("failed to get cluster version: %v", err)
 	}
-	status.SetClusterID(string(clusterVersion.Spec.ClusterID))
+	status.SetClientPlatformVersion(clusterVersion)
 
-	historyRecord := Find(clusterVersion.Status.History, func(record *configv1.UpdateHistory) bool {
-		return record.State == configv1.CompletedUpdate
-	})
-	if historyRecord == nil {
-		return fmt.Errorf("unable to find the updated cluster version")
+	clusterID, err := GetClusterId(ctx, kubeClient)
+	if err != nil {
+		return fmt.Errorf("failed to get cluster id: %v", err)
 	}
-	status.SetClientPlatformVersion(historyRecord.Version)
+	status.SetClusterID(clusterID)
 
 	clusterDNS := &configv1.DNS{}
 	clusterDNS.Name = "cluster"
-	if err := kubeClient.Get(ctx, client.ObjectKeyFromObject(clusterDNS), clusterDNS); err != nil {
+	if err := kubeClient.Get(ctx, client.ObjectKeyFromObject(clusterDNS), clusterDNS); !meta.IsNoMatchError(err) && client.IgnoreNotFound(err) != nil {
 		return fmt.Errorf("failed to get clusterDNS %q: %v", clusterDNS.Name, err)
 	}
-	status.SetClusterName(clusterDNS.Spec.BaseDomain)
+	if clusterDNS.UID != "" {
+		status.SetClusterName(clusterDNS.Spec.BaseDomain)
+	}
+	status.SetClusterName("cluster.local")
 
 	return nil
+}
+
+func GetClusterId(ctx context.Context, cl client.Client) (string, error) {
+	clusterVersion := &configv1.ClusterVersion{}
+	clusterVersion.Name = clusterVersionName
+	if err := cl.Get(ctx, client.ObjectKeyFromObject(clusterVersion), clusterVersion); !meta.IsNoMatchError(err) && client.IgnoreNotFound(err) != nil {
+		return "", fmt.Errorf("failed to get cluster version: %v", err)
+	}
+	if clusterVersion.UID != "" {
+		return string(clusterVersion.Spec.ClusterID), nil
+	}
+
+	systemNamespace := &corev1.Namespace{}
+	systemNamespace.Name = "kube-system"
+	if err := cl.Get(ctx, client.ObjectKeyFromObject(systemNamespace), systemNamespace); err != nil {
+		return "", fmt.Errorf("failed to get system namespace: %v", err)
+	}
+	return string(systemNamespace.UID), nil
+}
+
+func GetClusterVersion(ctx context.Context, cl client.Client) (string, error) {
+	clusterVersion := &configv1.ClusterVersion{}
+	clusterVersion.Name = clusterVersionName
+	if err := cl.Get(ctx, client.ObjectKeyFromObject(clusterVersion), clusterVersion); !meta.IsNoMatchError(err) && client.IgnoreNotFound(err) != nil {
+		return "", fmt.Errorf("failed to get cluster version: %v", err)
+	}
+
+	if clusterVersion.UID != "" {
+		historyRecord := Find(clusterVersion.Status.History, func(record *configv1.UpdateHistory) bool {
+			return record.State == configv1.CompletedUpdate
+		})
+		if historyRecord == nil {
+			return "", fmt.Errorf("unable to find the updated cluster version")
+		}
+		return historyRecord.Version, nil
+	}
+
+	kubeletVersion, err := GetKubeletVersion(ctx, cl)
+	if err != nil {
+		return "", fmt.Errorf("failed to get kubelet version: %v", err)
+	}
+	version, err := MapKubeletVersionToOCPVersion(kubeletVersion)
+	if err != nil {
+		return "", fmt.Errorf("failed to map kubelet version: %v", err)
+	}
+	return version, nil
+}
+
+func GetKubeletVersion(ctx context.Context, cl client.Client) (string, error) {
+	nodeList := &corev1.NodeList{}
+	if err := cl.List(ctx, nodeList); err != nil {
+		return "", err
+	}
+	var minVersion semver.Version
+	minVersionAsString := ""
+	for i := range nodeList.Items {
+		node := &nodeList.Items[i]
+		version, err := semver.Parse(strings.TrimPrefix(node.Status.NodeInfo.KubeletVersion, "v"))
+		if err != nil {
+			return "", err
+		}
+		// Initialize minVersion with the first valid version found
+		if minVersionAsString == "" {
+			minVersion = version
+			minVersionAsString = version.String()
+			continue
+		} else if version.LE(minVersion) {
+			minVersion = version
+			minVersionAsString = version.String()
+		}
+
+	}
+	return minVersionAsString, nil
+}
+
+func MapKubeletVersionToOCPVersion(version string) (string, error) {
+	ocpVersionByKubernetesVersion := map[string]string{
+		"1.34": "4.19",
+		"1.33": "4.19",
+		"1.32": "4.19",
+		"1.31": "4.18",
+	}
+
+	parts := strings.Split(version, ".")
+	majorMinorVersion := strings.Join(parts[:2], ".")
+	// Look up the major.minor version in the map
+	ocpVersion := ocpVersionByKubernetesVersion[majorMinorVersion]
+	if ocpVersion == "" {
+		return "", fmt.Errorf("no OCP version found for Kubernetes version %s", majorMinorVersion)
+	}
+
+	return ocpVersion, nil
 }
