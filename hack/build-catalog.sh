@@ -8,7 +8,6 @@ mkdir catalog
 ${OPM} render --output=yaml ${BUNDLE_IMG} > catalog/ocs-client-bundle.yaml
 ${OPM} render --output=yaml ${CSI_ADDONS_BUNDLE_IMG} > catalog/csi-adddons-bundle.yaml
 ${OPM} render --output=yaml ${CEPH_CSI_BUNDLE_IMG} > catalog/cephcsi-operator-bundle.yaml
-${OPM} render --output=yaml ${RECIPE_BUNDLE_IMG} > catalog/recipe.yaml
 ${OPM} render --output=yaml ${SNAPSHOT_CONTROLLER_BUNDLE_IMG} > catalog/odf-external-snapshotter-operator-bundle.yaml
 
 cat << EOF >> catalog/index.yaml
@@ -42,16 +41,6 @@ package: cephcsi-operator
 name: alpha
 entries:
   - name: $CEPH_CSI_BUNDLE_NAME.$CEPH_CSI_BUNDLE_VERSION
----
-defaultChannel: alpha
-name: $RECIPE_BUNDLE_NAME
-schema: olm.package
----
-schema: olm.channel
-package: recipe
-name: alpha
-entries:
-  - name: $RECIPE_BUNDLE_NAME.v$RECIPE_BUNDLE_VERSION
 ---
 defaultChannel: alpha
 name: $SNAPSHOT_CONTROLLER_PACKAGE_NAME
