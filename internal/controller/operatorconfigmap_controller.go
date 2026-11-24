@@ -436,11 +436,6 @@ func (c *OperatorConfigMapReconciler) Reconcile(ctx context.Context, req ctrl.Re
 			return ctrl.Result{}, err
 		}
 
-		if err := c.reconcileRecipeOperatorSubscription(); err != nil {
-			c.log.Error(err, "unable to reconcile Recipe Operator subscription")
-			return ctrl.Result{}, err
-		}
-
 		if err := c.reconcileODFSnapshotterSubscription(); err != nil {
 			c.log.Error(err, "unable to reconcile ODF External Snapshotter Operator subscription")
 			return ctrl.Result{}, err
@@ -448,6 +443,11 @@ func (c *OperatorConfigMapReconciler) Reconcile(ctx context.Context, req ctrl.Re
 
 		if err := c.reconcileOCSTLSProfilesSubscription(); err != nil {
 			c.log.Error(err, "unable to reconcile OCS TLS Profiles subscription")
+			return ctrl.Result{}, err
+		}
+
+		if err := c.removeRecipeOperator(); err != nil {
+			c.log.Error(err, "unable to remove recipe operator")
 			return ctrl.Result{}, err
 		}
 
@@ -1261,20 +1261,6 @@ func (c *OperatorConfigMapReconciler) reconcileCephCSIOperatorSubscription() err
 	return nil
 }
 
-func (c *OperatorConfigMapReconciler) reconcileRecipeOperatorSubscription() error {
-	recipeOperatorSubscription, err := getSubscriptionByPackageName(c.ctx, c.Client, c.OperatorNamespace, "recipe")
-	if err != nil {
-		return err
-	}
-	if c.subscriptionChannel != "" && c.subscriptionChannel != recipeOperatorSubscription.Spec.Channel {
-		recipeOperatorSubscription.Spec.Channel = c.subscriptionChannel
-		if err := c.update(recipeOperatorSubscription); err != nil {
-			return fmt.Errorf("failed to update subscription channel of 'recipe' to %v: %v", c.subscriptionChannel, err)
-		}
-	}
-	return nil
-}
-
 func (c *OperatorConfigMapReconciler) reconcileODFSnapshotterSubscription() error {
 	odfSnapshotterSubscription, err := getSubscriptionByPackageName(c.ctx, c.Client, c.OperatorNamespace, "odf-external-snapshotter-operator")
 	if err != nil {
@@ -1599,6 +1585,41 @@ func (c *OperatorConfigMapReconciler) shouldDisableAutoFencing() bool {
 		return true
 	}
 	return false
+}
+
+func (c *OperatorConfigMapReconciler) removeRecipeOperator() error {
+	csvList := &metav1.PartialObjectMetadataList{}
+	csvList.SetGroupVersionKind(opv1a1.SchemeGroupVersion.WithKind("ClusterServiceVersion"))
+	if err := c.list(csvList, client.InNamespace(c.OperatorNamespace)); err != nil {
+		return fmt.Errorf("failed to list csv: %v", err)
+	}
+
+	recipeCsvList := utils.Filter(csvList.Items, func(csv *metav1.PartialObjectMetadata) bool {
+		return strings.HasPrefix(csv.Name, "recipe")
+	})
+	for i := range recipeCsvList {
+		csv := &recipeCsvList[i]
+		if csv.GetDeletionTimestamp().IsZero() {
+			if err := c.delete(csv); err != nil {
+				c.log.Error(err, "failed to delete recipe operator csv")
+				return err
+			}
+		}
+	}
+
+	recipeOperatorSubscription, err := getSubscriptionByPackageName(c.ctx, c.Client, c.OperatorNamespace, "recipe")
+	if client.IgnoreNotFound(err) != nil {
+		return err
+	} else if recipeOperatorSubscription == nil {
+		return nil
+	}
+	if recipeOperatorSubscription.GetDeletionTimestamp().IsZero() {
+		if err := c.delete(recipeOperatorSubscription); client.IgnoreNotFound(err) != nil {
+			return err
+		}
+	}
+
+	return nil
 }
 
 func adjustPluginCpuResourcesForIbmZ(resources any, adjustFactor float64) {
